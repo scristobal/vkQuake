@@ -1,4 +1,5 @@
 option('use_sdl3', type : 'feature', value : 'auto', description : 'Use SDL3 (auto: prefer SDL3, fall back to SDL2)')
+option('use_vulkan_loader', type : 'feature', value : 'auto', description : 'macOS: link the Vulkan loader instead of MoltenVK, so the driver (MoltenVK, KosmicKrisp) is picked at runtime (auto: prefer the loader, fall back to MoltenVK)')
 option('use_codec_wave', type : 'feature', value : 'enabled')
 option('use_codec_mp3', type : 'feature', value : 'auto')
 option('use_codec_flac', type : 'feature', value : 'auto')

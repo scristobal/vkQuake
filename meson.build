@@ -359,11 +359,18 @@ if host_machine.system() == 'windows'
 endif
 
 if build_machine.system() == 'darwin'
-    molten_dirs = []
-    if import('fs').exists('/opt/homebrew/lib/libMoltenVK.dylib')
-        molten_dirs += '/opt/homebrew/lib'
+    vulkan_loader_dep = dependency('vulkan', version: '>=1.4.341', required : get_option('use_vulkan_loader'))
+    if vulkan_loader_dep.found()
+        deps += vulkan_loader_dep
+        message('Info: Using the Vulkan loader.')
+    else
+        molten_dirs = []
+        if import('fs').exists('/opt/homebrew/lib/libMoltenVK.dylib')
+            molten_dirs += '/opt/homebrew/lib'
+        endif
+        deps += cc.find_library('MoltenVK', required : true, dirs : molten_dirs)
+        message('Info: Using MoltenVK.')
     endif
-    deps += cc.find_library('MoltenVK', required : true, dirs : molten_dirs)
 else
     deps += dependency('vulkan', version: '>=1.4.341')
 endif

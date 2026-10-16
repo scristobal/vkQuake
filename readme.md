@@ -190,7 +190,7 @@ Meson prefers SDL3 and falls back to SDL2 if it is not installed; add `-Duse_sdl
 To compile vkQuake, first install the build dependencies with Homebrew:
 
 ~~~
-brew install molten-vk vulkan-headers glslang spirv-tools sdl3 libvorbis flac opus opusfile flac mpg123 meson pkgconfig
+brew install molten-vk vulkan-loader vulkan-headers glslang spirv-tools sdl3 libvorbis flac opus opusfile flac mpg123 meson pkgconfig
 ~~~
 
 Then clone the vkQuake repo:
@@ -207,6 +207,14 @@ meson build -Ddebug=true -Dstrip=false && ninja -C build
 ~~~
 
 Meson prefers SDL3 and falls back to SDL2 if it is not installed; add `-Duse_sdl3=disabled` to force SDL2 (or `enabled` to require SDL3).
+
+Meson also prefers linking the Vulkan loader (`vulkan-loader`) and falls back to linking MoltenVK directly if it is not installed; add `-Duse_vulkan_loader=disabled` to force MoltenVK (or `enabled` to require the loader). With the loader, the Vulkan driver is picked at runtime: on Apple Silicon with macOS 26 or newer you can use [KosmicKrisp](https://docs.mesa3d.org/drivers/kosmickrisp.html) instead of MoltenVK by installing it with `brew install mesa` and running:
+
+~~~
+VK_DRIVER_FILES=$(brew --prefix)/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json ./build/vkquake
+~~~
+
+Use `$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json` to force MoltenVK instead. Without `VK_DRIVER_FILES`, vkQuake picks the first discrete GPU, then the first integrated GPU the loader lists, or the device given with `-device <n>`.
 
 > **Note**\
 > The Meson version needs to be 1.3.0 or newer.
