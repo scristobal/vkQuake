@@ -1,0 +1,131 @@
+name: macOS nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  nightly-mac:
+    name: Nightly macOS Apple Silicon
+    # KosmicKrisp needs macOS 26, and Homebrew only builds it there
+    runs-on: macos-26
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Check for changes since the last nightly
+      id: check
+      run: |
+        last=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq .object.sha 2> /dev/null || true)
+        if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$last" = "$GITHUB_SHA" ]; then
+          echo "The nightly release is already at $GITHUB_SHA, skipping"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Install Dependencies
+      if: steps.check.outputs.skip != 'true'
+      run: brew install vulkan-loader mesa molten-vk vulkan-headers glslang spirv-tools sdl3 libvorbis flac opus opusfile mpg123 meson
+    - name: Build vkQuake
+      if: steps.check.outputs.skip != 'true'
+      run: meson setup build --buildtype=release -Ddebug=true -Dstrip=false -Duse_sdl3=enabled -Duse_vulkan_loader=enabled && ninja -C build
+    - name: Check for signing secrets
+      id: signing
+      if: steps.check.outputs.skip != 'true'
+      env:
+        MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
+        NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+        NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+      run: |
+        if [ -n "$MACOS_CERTIFICATE_P12" ] && [ -n "$MACOS_CERTIFICATE_PASSWORD" ] && [ -n "$NOTARY_API_KEY" ] && [ -n "$NOTARY_API_KEY_ID" ] && [ -n "$NOTARY_API_ISSUER_ID" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Signing and notarization secrets aren't all set, the app will be ad-hoc signed"
+        fi
+    - name: Import Developer ID certificate
+      if: steps.check.outputs.skip != 'true' && steps.signing.outputs.enabled == 'true'
+      env:
+        MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      run: |
+        keychain=$RUNNER_TEMP/signing.keychain-db
+        keychain_password=$(openssl rand -base64 24)
+        security create-keychain -p "$keychain_password" "$keychain"
+        security set-keychain-settings -lut 21600 "$keychain"
+        security unlock-keychain -p "$keychain_password" "$keychain"
+        echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+        security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+        rm "$RUNNER_TEMP/certificate.p12"
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+        security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+        identity=$(security find-identity -v -p codesigning "$keychain" | sed -n -E 's/.*"(Developer ID Application: .*)"/\1/p' | head -1)
+        if [ -z "$identity" ]; then
+          echo "No Developer ID Application identity in MACOS_CERTIFICATE_P12" >&2
+          exit 1
+        fi
+        echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+    - name: Build vkQuake.app
+      if: steps.check.outputs.skip != 'true'
+      run: |
+        BUNDLE_ID="io.github.$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]').vkquake" Packaging/macOS/build-app.sh build dist
+        dsymutil build/vkquake -o dist/vkquake.dSYM
+    - name: Notarize vkQuake.app
+      if: steps.check.outputs.skip != 'true' && steps.signing.outputs.enabled == 'true'
+      env:
+        NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
+        NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+        NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+      run: |
+        echo "$NOTARY_API_KEY" > "$RUNNER_TEMP/notary.p8"
+        notary=(--key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID")
+        ditto -c -k --keepParent dist/vkQuake.app "$RUNNER_TEMP/notarize.zip"
+        xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${notary[@]}" --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json" || true
+        cat "$RUNNER_TEMP/notary.json"
+        status=$(plutil -extract status raw -o - "$RUNNER_TEMP/notary.json" 2> /dev/null || true)
+        if [ "$status" != Accepted ]; then
+          id=$(plutil -extract id raw -o - "$RUNNER_TEMP/notary.json" 2> /dev/null || true)
+          [ -n "$id" ] && xcrun notarytool log "$id" "${notary[@]}"
+          echo "Notarization failed: ${status:-no status}" >&2
+          exit 1
+        fi
+        # Attach the ticket to the app so Gatekeeper can check it offline
+        xcrun stapler staple dist/vkQuake.app
+        spctl --assess --type execute --verbose dist/vkQuake.app
+        rm "$RUNNER_TEMP/notary.p8"
+    - name: Package
+      if: steps.check.outputs.skip != 'true'
+      run: |
+        cd dist
+        ditto -c -k --keepParent vkQuake.app vkQuake-nightly-macos-arm64.zip
+        ditto -c -k --keepParent vkquake.dSYM vkQuake-nightly-macos-arm64-debug.zip
+    - name: Publish nightly release
+      if: steps.check.outputs.skip != 'true'
+      run: |
+        min_macos=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" dist/vkQuake.app/Contents/Info.plist)
+        if [ "${{ steps.signing.outputs.enabled }}" = true ]; then
+          gatekeeper="The app is signed with a Developer ID and notarized by Apple, so it opens without security warnings."
+        else
+          gatekeeper="The app is ad-hoc signed but not notarized, so macOS blocks the first launch. Allow it in System Settings > Privacy & Security > Open Anyway, or run \`xattr -dr com.apple.quarantine vkQuake.app\`."
+        fi
+        cat > notes.md << EOF
+        Automated build of [\`${GITHUB_SHA:0:8}\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA) from $(date -u +%Y-%m-%d). Replaced every night when there are new commits.
+
+        **Requirements:** Apple Silicon Mac with macOS $min_macos or newer.
+
+        **Install:** unzip and put \`vkQuake.app\` in your Quake folder, next to \`id1\`.
+
+        $gatekeeper
+
+        **Vulkan driver:** uses the bundled [KosmicKrisp](https://docs.mesa3d.org/drivers/kosmickrisp.html) by default. To use the bundled MoltenVK instead, start it with \`-moltenvk\`, e.g. \`open vkQuake.app --args -moltenvk\`.
+
+        Debug symbols for crash reports are in \`vkQuake-nightly-macos-arm64-debug.zip\`.
+        EOF
+        gh release delete nightly --yes --cleanup-tag || true
+        gh release create nightly dist/vkQuake-nightly-macos-arm64.zip dist/vkQuake-nightly-macos-arm64-debug.zip \
+          --prerelease --target "$GITHUB_SHA" --title "Nightly macOS build $(date -u +%Y-%m-%d)" --notes-file notes.md
+    - name: Remove signing keychain
+      if: always() && steps.signing.outputs.enabled == 'true'
+      run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

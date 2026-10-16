@@ -843,14 +843,14 @@ static void GL_InitInstance (void)
 	if (!sdl_extensions)
 		Sys_Error ("SDL_Vulkan_GetInstanceExtensions failed: %s", SDL_GetError ());
 
-	const char **const instance_extensions = Mem_Alloc (sizeof (const char *) * (sdl_extension_count + 4));
+	const char **const instance_extensions = Mem_Alloc (sizeof (const char *) * (sdl_extension_count + 5));
 	for (i = 0; i < sdl_extension_count; i++)
 		instance_extensions[i] = sdl_extensions[i];
 #else
 	if (!SDL_Vulkan_GetInstanceExtensions (draw_context, &sdl_extension_count, NULL))
 		Sys_Error ("SDL_Vulkan_GetInstanceExtensions failed: %s", SDL_GetError ());
 
-	const char **const instance_extensions = Mem_Alloc (sizeof (const char *) * (sdl_extension_count + 4));
+	const char **const instance_extensions = Mem_Alloc (sizeof (const char *) * (sdl_extension_count + 5));
 	if (!SDL_Vulkan_GetInstanceExtensions (draw_context, &sdl_extension_count, instance_extensions))
 		Sys_Error ("SDL_Vulkan_GetInstanceExtensions failed: %s", SDL_GetError ());
 #endif
@@ -862,6 +862,9 @@ static void GL_InitInstance (void)
 
 	vulkan_globals.get_surface_capabilities_2 = false;
 	vulkan_globals.get_physical_device_properties_2 = false;
+#ifdef __APPLE__
+	qboolean portability_enumeration = false;
+#endif
 	if (err == VK_SUCCESS || instance_extension_count > 0)
 	{
 		VkExtensionProperties *extension_props = (VkExtensionProperties *)Mem_Alloc (sizeof (VkExtensionProperties) * instance_extension_count);
@@ -873,6 +876,10 @@ static void GL_InitInstance (void)
 				vulkan_globals.get_surface_capabilities_2 = true;
 			if (strcmp (VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, extension_props[i].extensionName) == 0)
 				vulkan_globals.get_physical_device_properties_2 = true;
+#ifdef __APPLE__
+			if (strcmp (VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME, extension_props[i].extensionName) == 0)
+				portability_enumeration = true;
+#endif
 #ifdef _DEBUG
 			if (strcmp (VK_EXT_DEBUG_UTILS_EXTENSION_NAME, extension_props[i].extensionName) == 0)
 				vulkan_globals.debug_utils = true;
@@ -913,6 +920,15 @@ static void GL_InitInstance (void)
 		instance_extensions[sdl_extension_count + additionalExtensionCount++] = VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
 	if (vulkan_globals.get_physical_device_properties_2)
 		instance_extensions[sdl_extension_count + additionalExtensionCount++] = VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
+
+#ifdef __APPLE__
+	// When going through the Vulkan loader, MoltenVK is only listed if portability drivers are enumerated
+	if (portability_enumeration)
+	{
+		instance_extensions[sdl_extension_count + additionalExtensionCount++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+		instance_create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+	}
+#endif
 
 #ifdef _DEBUG
 	if (vulkan_globals.debug_utils)
@@ -1124,6 +1140,10 @@ static const char *GetDeviceVendorFromDeviceProperties (void)
 	return NULL;
 }
 
+#ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME // provisional extension, only declared with VK_ENABLE_BETA_EXTENSIONS
+#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
+#endif
+
 /*
 ===============
 GL_InitDevice
@@ -1154,17 +1174,23 @@ static void GL_InitDevice (void)
 	vkEnumeratePhysicalDevices (vulkan_instance, &physical_device_count, physical_devices);
 	if (!arg_index)
 	{
-		// If no device was specified by command line pick first discrete GPU
+		// If no device was specified by command line pick first discrete GPU, then first integrated GPU,
+		// so CPU implementations like llvmpipe are only picked if nothing else is there
+		int discrete_index = -1;
+		int integrated_index = -1;
 		for (i = 0; i < physical_device_count; ++i)
 		{
 			VkPhysicalDeviceProperties device_properties;
 			vkGetPhysicalDeviceProperties (physical_devices[i], &device_properties);
-			if (device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
-			{
-				device_index = (int)i;
-				break;
-			}
+			if ((discrete_index < 0) && (device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU))
+				discrete_index = (int)i;
+			if ((integrated_index < 0) && (device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU))
+				integrated_index = (int)i;
 		}
+		if (discrete_index >= 0)
+			device_index = discrete_index;
+		else if (integrated_index >= 0)
+			device_index = integrated_index;
 	}
 	vulkan_physical_device = physical_devices[device_index];
 	Mem_Free (physical_devices);
@@ -1185,6 +1211,7 @@ static void GL_InitDevice (void)
 	qboolean driver_properties_available = false;
 	qboolean present_id = false;
 	qboolean present_wait = false;
+	qboolean portability_subset = false;
 	uint32_t device_extension_count;
 	err = vkEnumerateDeviceExtensionProperties (vulkan_physical_device, NULL, &device_extension_count, NULL);
 
@@ -1213,6 +1240,8 @@ static void GL_InitDevice (void)
 				push_descriptor = true;
 			if (strcmp (VK_KHR_RAY_QUERY_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
 				vulkan_globals.ray_query = true;
+			if (strcmp (VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+				portability_subset = true;
 #if defined(VK_KHR_present_wait2)
 			if (strcmp (VK_KHR_PRESENT_ID_2_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
 				present_id = true;
@@ -1250,6 +1279,13 @@ static void GL_InitDevice (void)
 
 	if (driver_properties_available)
 		Con_Printf ("Driver: %s %s\n", driver_properties.driverName, driver_properties.driverInfo);
+
+#ifdef __APPLE__
+	// Other drivers like KosmicKrisp don't need the MoltenVK workarounds. Keep them if the driver can't be identified.
+	vulkan_globals.moltenvk = !driver_properties_available || ((int)driver_properties.driverID == DRIVER_ID_MOLTENVK);
+#else
+	vulkan_globals.moltenvk = false;
+#endif
 
 	if (!found_swapchain_extension)
 		Sys_Error ("Couldn't find %s extension", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
@@ -1367,9 +1403,8 @@ static void GL_InitDevice (void)
 	else
 		vkGetPhysicalDeviceFeatures (vulkan_physical_device, &vulkan_globals.device_features);
 
-#ifdef __APPLE__ // MoltenVK lies about this
-	vulkan_globals.device_features.sampleRateShading = false;
-#endif
+	if (vulkan_globals.moltenvk) // MoltenVK lies about this
+		vulkan_globals.device_features.sampleRateShading = false;
 
 	vulkan_globals.shader_float16 = shader_float16_features.shaderFloat16;
 	if (vulkan_globals.shader_float16)
@@ -1400,6 +1435,9 @@ static void GL_InitDevice (void)
 
 	const char *device_extensions[32] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 	uint32_t	numEnabledExtensions = 1;
+	// Spec requires enabling it when a (portability) driver like MoltenVK exposes it
+	if (portability_subset)
+		device_extensions[numEnabledExtensions++] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
 	if (vulkan_globals.shader_float16)
 		device_extensions[numEnabledExtensions++] = VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME;
 	if (vulkan_globals.dedicated_allocation)
@@ -1914,9 +1952,11 @@ static void GL_CreateColorBuffer (void)
 	{
 		const int fsaa = (int)vid_fsaa.value;
 
+		// Query with the MSAA color buffer usage: the storage usage of the resolved color buffers limits drivers
+		// without shaderStorageImageMultisample (e.g. KosmicKrisp) to 1 sample
 		VkImageFormatProperties image_format_properties;
 		vkGetPhysicalDeviceImageFormatProperties (
-			vulkan_physical_device, vulkan_globals.color_format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, image_create_info.usage, 0,
+			vulkan_physical_device, vulkan_globals.color_format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0,
 			&image_format_properties);
 
 		// Workaround: Intel advertises 16 samples but crashes when using it.
@@ -3943,6 +3983,41 @@ static void R_CreatePaletteOctreeBuffers (uint32_t *colors, int num_colors, pale
 	}
 }
 
+#ifdef __APPLE__
+/*
+===================
+VID_UseBundledVulkanDriver
+
+App bundles ship their own Vulkan driver manifests in Contents/Resources/vulkan. Point the loader at the bundled
+KosmicKrisp, or MoltenVK with -moltenvk, so drivers installed elsewhere (e.g. Homebrew) aren't loaded as well.
+VK_DRIVER_FILES or VK_ICD_FILENAMES set by the user take precedence.
+===================
+*/
+static void VID_UseBundledVulkanDriver (void)
+{
+	char manifest[MAX_OSPATH];
+
+	if (getenv ("VK_DRIVER_FILES") || getenv ("VK_ICD_FILENAMES"))
+		return;
+
+#ifdef USE_SDL3
+	const char *base_path = SDL_GetBasePath (); // Contents/Resources/ inside an app bundle
+#else
+	char *base_path = SDL_GetBasePath ();
+#endif
+	if (!base_path)
+		return;
+	q_snprintf (
+		manifest, sizeof (manifest), "%svulkan/%s", base_path, COM_CheckParm ("-moltenvk") ? "moltenvk/MoltenVK_icd.json" : "icd.d/kosmickrisp_icd.json");
+#ifndef USE_SDL3
+	SDL_free (base_path);
+#endif
+
+	if (Sys_FileType (manifest) == FS_ENT_FILE)
+		setenv ("VK_DRIVER_FILES", manifest, 1);
+}
+#endif
+
 /*
 ===================
 VID_Init
@@ -4002,6 +4077,9 @@ void VID_Init (void)
 #endif
 
 	putenv (vid_center); /* SDL_putenv is problematic in versions <= 1.2.9 */
+#ifdef __APPLE__
+	VID_UseBundledVulkanDriver (); // before SDL creates a Vulkan window, which loads the drivers
+#endif
 
 #ifdef USE_SDL3
 	if (!SDL_InitSubSystem (SDL_INIT_VIDEO))
