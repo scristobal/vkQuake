@@ -1280,6 +1280,13 @@ static void GL_InitDevice (void)
 	if (driver_properties_available)
 		Con_Printf ("Driver: %s %s\n", driver_properties.driverName, driver_properties.driverInfo);
 
+#ifdef __APPLE__
+	// Other drivers like KosmicKrisp don't need the MoltenVK workarounds. Keep them if the driver can't be identified.
+	vulkan_globals.moltenvk = !driver_properties_available || ((int)driver_properties.driverID == DRIVER_ID_MOLTENVK);
+#else
+	vulkan_globals.moltenvk = false;
+#endif
+
 	if (!found_swapchain_extension)
 		Sys_Error ("Couldn't find %s extension", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
@@ -1396,9 +1403,8 @@ static void GL_InitDevice (void)
 	else
 		vkGetPhysicalDeviceFeatures (vulkan_physical_device, &vulkan_globals.device_features);
 
-#ifdef __APPLE__ // MoltenVK lies about this
-	vulkan_globals.device_features.sampleRateShading = false;
-#endif
+	if (vulkan_globals.moltenvk) // MoltenVK lies about this
+		vulkan_globals.device_features.sampleRateShading = false;
 
 	vulkan_globals.shader_float16 = shader_float16_features.shaderFloat16;
 	if (vulkan_globals.shader_float16)
@@ -1946,9 +1952,11 @@ static void GL_CreateColorBuffer (void)
 	{
 		const int fsaa = (int)vid_fsaa.value;
 
+		// Query with the MSAA color buffer usage: the storage usage of the resolved color buffers limits drivers
+		// without shaderStorageImageMultisample (e.g. KosmicKrisp) to 1 sample
 		VkImageFormatProperties image_format_properties;
 		vkGetPhysicalDeviceImageFormatProperties (
-			vulkan_physical_device, vulkan_globals.color_format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, image_create_info.usage, 0,
+			vulkan_physical_device, vulkan_globals.color_format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0,
 			&image_format_properties);
 
 		// Workaround: Intel advertises 16 samples but crashes when using it.

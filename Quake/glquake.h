@@ -355,6 +355,7 @@ typedef struct
 	qboolean						 multi_draw_indirect;
 	qboolean						 screen_effects_sops;
 	qboolean						 shader_float16;
+	qboolean						 moltenvk;
 
 	// Instance extensions
 	qboolean get_surface_capabilities_2;

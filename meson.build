@@ -115,7 +115,7 @@ bintoc = executable('bintoc', ['Shaders/bintoc.c'], native: true)
 mkpak = executable('mkpak', ['Misc/vq_pak/mkpak.c'], native: true)
 
 if (build_machine.system() == 'darwin') or get_option('buildtype').startswith('debug')
-    spirv_opt_args = [] # MoltenVK spirv-cross has a bug that breaks optimized shaders
+    spirv_opt_args = [] # MoltenVK spirv-cross has a bug that breaks optimized shaders. Also applies to Vulkan loader builds, which can run on MoltenVK
 else
     if not has_canonicalize_ids_spirv_opt
         error('spirv-opt does not support --canonicalize-ids, a newer Vulkan SDK is required')
